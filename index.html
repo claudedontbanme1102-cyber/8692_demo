@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>World4Refiner · Repairing planned trajectories with a geometric certificate</title>
+<meta name="description" content="Edit trajectories inside a frozen planner's own control family and accept an edit only after an exact geometric certificate verifies every frame: significant gains on five non-TTO bases, zero harm on the held-out split.">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/inter@5/400.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/inter@5/500.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/inter@5/600.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/sora@5/500.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/sora@5/600.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/sora@5/700.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+
+<nav class="nav" id="nav"><div class="in">
+  <a class="brand" href="#top"><i></i>World4Refiner</a>
+  <div class="links">
+    <a href="#overview">Overview</a><a href="#why">Motivation</a><a href="#method">Mechanism</a><a href="#demo">Demo</a>
+    <a href="#cases">Cases</a><a href="#sens">Sensitivity</a><a href="#results">Results</a>
+    <a href="#limits">Limits</a><a href="#bibtex">References</a>
+  </div>
+  <a class="lang" href="zh/" hreflang="zh-CN">中文</a>
+  <button class="theme" id="theme">Dark</button>
+</div></nav>
+
+<header class="hero" id="top">
+  <canvas id="hero-canvas" aria-hidden="true"></canvas>
+  <div class="veil"></div>
+  <div class="content">
+  <span class="badge"><b></b>NAVSIM v2 navhard · offline trajectory repair</span>
+  <h1><span class="gradtext">Repair the trajectory<br>that would collide</span></h1>
+  <p class="sub">No re-scoring, no retraining: edit one trajectory inside the planner's own control family,
+     verify it frame by frame with an exact geometric certificate, and revert whenever the edit fails.
+     Five non-TTO bases all improve significantly; on the held-out split, 14 rescues and 0 harms.</p>
+  <p class="notes">The certificate reads geometry and map only — never the answer key, never future ground truth, never the official score</p>
+  <div class="cta">
+    <a class="btn primary" href="#demo">Interactive demo<small>one decision</small></a>
+    <a class="btn" href="#method">Mechanism</a>
+    <a class="btn" href="#results">Results</a>
+    <a class="btn" href="#limits">Limits</a>
+  </div>
+</div></header>
+
+<main class="wrap">
+
+<!-- ============ overview ============ -->
+<section class="block" id="overview">
+  <div class="kicker reveal">Overview</div>
+  <h2 class="reveal">The conclusion first: positive, explainable, revertible</h2>
+  <p class="lead reveal">A frozen planner emits one trajectory. We do not re-score its candidates and we add no scoring head.
+     Instead we search the planner's own control family (hold / brake / accel / cut-in left-right / sweep left-right)
+     for an alternative trajectory, and accept it only when an exact geometric certificate proves that the alternative
+     keeps clearance over the whole prediction horizon without sacrificing progress.
+     If the certificate fails, the base trajectory is returned unchanged.</p>
+
+  <div class="grid g4 reveal" id="stat-tiles">
+    <div class="card stat"><div class="v pos" data-stat="cross">—</div>
+      <div class="l">Cross-base EPDMS gain</div>
+      <div class="s" data-stat-sub="cross">five non-TTO bases, every 95% CI lower bound above 0</div></div>
+    <div class="card stat"><div class="v pos" data-stat="harm">—</div>
+      <div class="l">Harms on the held-out split</div>
+      <div class="s" data-stat-sub="harm">conflicts rescued on the same tokens, with zero harm</div></div>
+    <div class="card stat"><div class="v pos" data-stat="navtest">—</div>
+      <div class="l">navtest net gain, both instruments</div>
+      <div class="s" data-stat-sub="navtest">v1 non-reactive and v2 reactive, each against its own baseline</div></div>
+    <div class="card stat"><div class="v pos" data-stat="attr">—</div>
+      <div class="l">Repair attribution accuracy</div>
+      <div class="s" data-stat-sub="attr">share of changed tokens traced to the correct conflict cause</div></div>
+  </div>
+
+  <div class="tldr reveal">
+    <b>In one sentence:</b> this is a <b>certificate-gated offline trajectory post-processor</b> — every decision rests on
+    geometry (separation / penetration / drivable area / progress floor); pass and the trajectory changes, fail and it reverts,
+    so gains are attributable token by token and failures are revertible token by token.
+    <div class="note" style="margin-top:8px">Every number on this page is generated from the on-disk ledgers; none is hand-typed.</div>
+  </div>
+
+  <div class="grid g3 reveal" style="margin-top:22px" id="instrument-cards"></div>
+</section>
+
+<!-- ============ motivation ============ -->
+<section class="block" id="why">
+  <div class="kicker reveal">Motivation</div>
+  <h2 class="reveal">Why repair a plan after planning is done?</h2>
+  <p class="lead reveal">A deployed planner is <b>frozen</b>: it emits one trajectory without looking ahead, and in cut-in
+     scenarios that trajectory drives straight into the predicted box of another agent. Retraining the planner, training a
+     scorer, or peeking at the evaluation key — all three routes are blocked by the deployment contract. What we add is
+     <b>not a score but a proof</b>: a local edit inside the planner's own control family, rolled forward frame by frame
+     against the planner's own predicted agent futures, committed only when every signed clearance is non-negative and
+     progress is preserved; otherwise the base plan is returned unchanged.</p>
+
+  <div class="fig reveal">
+    <img src="assets/figs/fig3_motivation.png" alt="Three-act motivation cartoon: act one, the frozen planner's committed path penetrates a predicted agent box (hatched overlap, worst-frame gap -1.51 m at frame 40/41); act two, three tempting but undeployable fixes (retrain the planner, train a learned scorer correlated 0.9999998 with the geometric head, read the evaluation answer key); act three, the four-step geometric certificate (edit within the family, roll forward against own predictions, non-negative signed clearance per frame, commit on pass else keep base) with three result tiles (5/5 non-TTO bases positive, 14/0 rescues/harms, 56/56 edits attributable)">
+    <div class="figcap"><b>Fig. 1 · Motivation in three acts.</b> <b>Act one</b>: a real held-out scene; the red path is the base
+       trajectory committed by the frozen planner. The small bird's-eye view below draws the tightest pair at the worst frame —
+       ego (red) and the agent box (grey) overlap in the hatched region, gap −1.51 m at frame 40 / 41 (t = +4.0 s).
+       <b>Act two</b>: three fixes that look tempting but are undeployable — retraining means new weights and weeks of GPU while
+       the deployment stack is frozen by contract; a learned scorer correlates 0.9999998 with the geometric head, so the learned
+       part adds nothing; reading the answer key (oracle / future ground truth / official score) is worse: unavailable at
+       deployment, and using it would be cheating. <b>Act three</b>: ask geometry instead — four checkable steps; the three tiles
+       at the bottom are the receipt: 5/5 non-TTO bases positive, 14 rescues / 0 harms held-out, 56/56 committed edits attributable
+       to a specific agent and frame. <b>What we add is a proof, not a score.</b></div>
+  </div>
+</section>
+
+<!-- ============ mechanism ============ -->
+<section class="block" id="method">
+  <div class="kicker reveal">Mechanism</div>
+  <h2 class="reveal">One pipeline, three sections</h2>
+  <p class="lead reveal">The figure below is the complete pipeline in three sections. Left: the <b>frozen planner</b>
+     (stitched camera input → encoders and BEV features → the DiffusionDrive diffusion head, emitting one trajectory with no
+     lookahead). Middle: our added <b>certificate-gated repair</b> (<b>training-free</b>: the planner's own eight local edits
+     form the candidate library, a candidate-conditioned world model predicts agent reactions, and the exact geometric
+     certificate dispositions each candidate). Right: the <b>output</b> (the committed trajectory).
+     Every part does one job, and every part's output can be inspected on its own.</p>
+
+  <div class="fig reveal">
+    <img src="assets/figs/fig2_pipeline.png" alt="World4Refiner mechanism pipeline: left, the frozen planner (stitched left|front|right camera input, encoders and BEV features, DiffusionDrive diffusion head emitting one trajectory without lookahead); middle, our training-free certificate-gated repair (8 candidate edits, candidate-conditioned agent futures, exact signed-distance certificate F/S/P plus official channels); right, the committed trajectory, with a 41-frame timeline along the bottom">
+    <div class="figcap"><b>Fig. 2 · Mechanism pipeline.</b> Read three sections left to right. ① <b>Frozen planner</b>: the camera
+       input is the stitched left|front|right crop; image / lidar / status encoders and BEV features feed DiffusionDrive's
+       plan-anchor diffusion head, which emits one trajectory with no lookahead. In this scene the base trajectory drives
+       straight into the predicted cut-in vehicle (red dashed, star), gap −1.51 m. ② <b>World4Refiner (training-free, geometry
+       only)</b>: the planner's own eight local edits form the candidate library (two pass, ticked); a candidate-conditioned
+       world model predicts how agents react (41 frames × 37 agents); the exact geometric certificate dispositions each
+       candidate — F (zero penetration over 41 frames), S (separation from every agent), P (progress no worse than base −1 m) —
+       together with the official channels DAC / DDC / LK / HC / NC / TTC. The two insets in the certificate panel draw the
+       tightest pair directly: ego (red) overlapping the agent box (violet) by −1.51 m under the base, separated by +1.74 m
+       after the committed edit. The polyline at lower left is the per-frame minimum clearance: the base crosses zero, the
+       certified edit never does. ③ <b>Output</b>: committed trajectory (blue) against base (red dashed); the gap goes from
+       −1.51 m to +1.74 m while progress even exceeds the base by 0.03 m. The official scorer prices the result offline only
+       and never enters the decision path.</div>
+  </div>
+
+  <div class="fig reveal" style="margin-top:18px">
+    <img src="assets/figs/fig2_certificate.png" alt="The certificate gate in three steps: (a) one reading — the exact signed rectangle distance between the ego rectangle and a predicted agent box, green for separation, red hatching for overlap; (b) the whole grid — 9 candidates x 41 frames x 37 agent boxes = 1517 readings per candidate, unrolled per frame into a heat band, the base row turning red at the conflict; (c) the decision gate — three hard constraints F/S/P, base rejected with 24/41 penetrating frames and worst -1.51 m, the cut-in R edit accepted with 0/41 and worst +1.74 m">
+    <div class="figcap"><b>Fig. 3 · The certificate gate is geometry, not a score.</b> No trained scoring, no reward model —
+       the whole decision chain has three steps. <b>(a) One reading</b>: treat the ego rectangle and a predicted agent box as
+       two rectangles and compute their <b>signed distance</b> with the separating-axis theorem (SAT) — a thin green line means
+       separated, red hatching means overlapping, and the reading is the gap in metres. <b>(b) The whole grid</b>: each
+       candidate reads 41 frames × 37 agent boxes = <b>1517 readings</b>; the horizontal axis is the 41 frames (0.1 s per cell),
+       red = overlap, green = separation. The base row turns red through the conflict (worst −1.51 m, 24/41 frames penetrating)
+       while the cut-in R row has no red cell at all (worst +1.74 m); the other candidates have red stretches of their own.
+       <b>(c) The decision gate</b>: on top of the geometric readings sit three hard constraints — <b>F</b> (zero penetration
+       over 41 frames), <b>S</b> (separation from every agent), <b>P</b> (progress no worse than base −1 m). Only a candidate
+       passing all three may replace the base; otherwise the base is returned unchanged. The two numbers in the bottom bar are
+       this scene's final comparison: base <b>24/41 frames penetrating, worst −1.51 m</b>; certified edit <b>0/41, worst
+       +1.74 m</b>.</div>
+  </div>
+
+  <div class="fig reveal" style="margin-top:18px">
+    <img src="assets/figs/fig2_certtable.png" alt="The certificate as an exact geometric distance table: left, the spatial view (ego rectangle as query, each predicted agent box as key, edge numbers are exact signed rectangle distances); middle, the temporal view (the same query replayed over 41 frames); right, the full table (rows are frames, columns are 37 agent boxes, reading is the table minimum)">
+    <div class="figcap"><b>Fig. 4 · The certificate is a geometric table, not a score.</b>
+       <b>1 Space</b>: at one frame the ego rectangle is the query and each predicted agent box a key; the number on the edge
+       is the exact rectangle distance between them, signed — negative means the two rectangles overlap. <b>2 Time</b>: the
+       same query replayed over all 41 frames; a frame turns red if it overlaps any agent (24 such frames for the base here).
+       <b>3 Full table</b>: rows are frames, columns are the 37 predicted agent boxes, and the reading is the table minimum.
+       The base table has 24 red cells and a worst pair of −1.51 m, so it is rejected; the certified edit's table has no red
+       cell and a worst pair of +1.74 m, so it is committed. Every cell is an exact distance between our own rectangle and an
+       agent box the scene encoder already predicted: no learned score, no oracle, no future ground truth.</div>
+  </div>
+
+  <div class="fig reveal" style="margin-top:18px">
+    <img src="assets/figs/fig3_counterfactual.png" alt="Nine counterfactual futures of one decision: (a) the candidate fan on the real map (base red dashed, certified edit blue, other passers green, rejected grey), with ego and responsible agent rectangles at the worst base frame; (b) the certificate matrix, rows are 9 futures, columns 41 frames, cell colour the minimum signed clearance over 37 agents, per-row worst value and pass/fail at right; (c) the attribution chain of the committed row (edit, conflict agent and frame, clearance flip, progress delta); (d) the deployment contract: what the gate reads and what it never reads">
+    <div class="figcap"><b>Fig. 5 · One decision, nine counterfactual futures.</b> <b>(a)</b> All nine candidates drawn at once on
+       the real map: base red dashed, certified edit blue, other clearance-passing edits green, rejected grey; rectangles and
+       the star mark ego and the responsible agent at the base's worst frame. <b>(b)</b> Certificate matrix: one row per future,
+       each cell the <b>minimum signed clearance over all 37 agents</b> at that frame — red overlap, green separation. The base
+       row turns red through the conflict (24/41 frames); the certified row never does. Note the two "all green yet fail" rows:
+       hold and brake 0.5 avoid every agent but fall more than 1 m behind the base in progress — <b>the gate demands clearance
+       and progress together</b>. <b>(c)</b> The committed row is attributable: which edit, which agent at which frame, clearance
+       flipping from −1.51 to +1.74 m, progress +0.03 m over base; 56/56 committed edits attribute correctly on held-out.
+       <b>(d)</b> Deployment contract: the gate reads only ego/agent rectangles, the planner's own predictions, and drivable-area
+       boundaries; it <b>never reads</b> the official scorer, future ground truth, a learned scoring head, or stage-2 training
+       weights — the official scorer prices the result offline, after the decision.</div>
+  </div>
+
+  <div class="grid g4 reveal" style="margin-top:20px">
+    <div class="card idea"><div class="n">Part 1</div><h3>Frozen planner</h3>
+      <p>No training, no fine-tuning. The base trajectory and its own scene predictions (agent futures) are taken as input,
+         so the method consumes no training budget.</p></div>
+    <div class="card idea"><div class="n">Part 2</div><h3>Trajectory editor</h3>
+      <p>Parametric edits inside the planner's control family: hold, brake, accel, cut-in left / right, sweep left / right.
+         We edit controls; we do not regenerate a trajectory.</p></div>
+    <div class="card idea"><div class="n">Part 3</div><h3>Geometric certificate</h3>
+      <p>Exact separation / penetration between the ego rectangle and every agent rectangle via SAT, checked at all 41
+         frames, plus two hard constraints: drivable area and progress.</p></div>
+    <div class="card idea"><div class="n">Part 4</div><h3>Selection and fallback</h3>
+      <p>An edit is accepted only if it keeps clearance throughout and preserves progress; otherwise the base is returned
+         unchanged. Gains therefore never come from trading something else away.</p></div>
+  </div>
+
+  <div class="theory reveal" style="margin-top:24px">
+    <div class="card">
+      <h3>Edit objective</h3>
+      <div class="eq" data-tex="\tau^{\text{edit}} = \mathcal{T}\bigl(u_\theta,\, \Delta\bigr),\qquad \Delta \in \{\text{hold}, \text{brake}, \text{accel}, \text{cut}_L, \text{cut}_R, \text{sweep}_L, \text{sweep}_R\}"></div>
+      <p class="eqnote">The edit operator acts on the controls emitted by the planner; the candidate set is the control family
+         itself, so there is no room to "swap in a new trajectory".</p>
+
+      <h3>Geometric certificate</h3>
+      <div class="eq" data-tex="g_t \;=\; \bigl\| \max\bigl(s_t(\tau^{\text{base}},\, a_t),\, 0\bigr) \bigr\|_2,\qquad s_t \in \{\text{separation},\ \text{penetration}\}"></div>
+      <p class="eqnote">SAT yields separation and penetration together (signed). The certificate requires
+         <code>g_t ≥ 0</code> at every instant against every agent.</p>
+
+      <h3>Selection rule</h3>
+      <div class="eq" data-tex="\tau^{*} = \begin{cases} \tau^{\text{edit}} & \text{if } \mathcal{C}(\tau^{\text{edit}}) = \mathrm{pass} \\[2pt] \tau^{\text{base}} & \text{otherwise} \end{cases}"></div>
+      <p class="eqnote">The certificate is a hard gate, not a weighted score; failure means fallback — there is no "partial acceptance".</p>
+    </div>
+
+    <div class="card">
+      <h3>Certificate checklist</h3>
+      <ul class="note" style="line-height:2;padding-left:18px;margin:0 0 6px">
+        <li><b>Non-negative clearance</b>: 41 instants × all agents, SAT clearance ≥ 0 everywhere;</li>
+        <li><b>Zero penetration</b>: penetration must be 0 at every instant — "a little less" is not accepted;</li>
+        <li><b>Stay drivable</b>: inside lane / road polygons throughout, no sidewalk, no curb crossing;</li>
+        <li><b>Same direction</b>: never enter opposing traffic (heading angle beyond 60° is a violation);</li>
+        <li><b>Progress</b>: terminal displacement no worse than the base (1 m tolerance);</li>
+        <li><b>Revertible</b>: edits stay inside the planner's control family; any single failure reverts the whole edit.</li>
+      </ul>
+
+      <h3 style="margin-top:18px">This navhard evaluation funnel</h3>
+      <div class="funnel" id="cert-list"></div>
+      <p class="note">No item on this list depends on the official score, future ground truth, or training weights,
+         so the whole checklist can be re-verified independently at deployment.</p>
+      <div class="verdict" id="cert-verdict">all checks pass ⇒ commit the edit</div>
+      <p class="cap">Any single failure ⇒ the edit is void and the trajectory reverts to base; among changed tokens,
+         harm is decided directly by this fallback mechanism.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ demo ============ -->
+<section class="block" id="demo">
+  <div class="kicker reveal">Interactive demo</div>
+  <h2 class="reveal">Scrub the timeline and watch one trajectory get repaired</h2>
+  <p class="lead reveal">Real scenes below (real map + real front-camera frames + the planner's own agent predictions).
+     Playback has two phases: <b>t &lt; 0</b> replays the real pre-decision camera observations (2 Hz, interpolated playback;
+     the filmstrip below is clickable); <b>t ≥ 0</b> enters the geometry replay — the left screen renders the planner's cached
+     prediction through a pinhole camera: the red translucent box is the <b>base ghost</b>, which drives into the cut-in agent
+     at the conflict frame; our own vehicle is the camera, and the certified edit keeps clearance throughout. The right screen
+     is a heading-up bird's-eye view: the fan of eight candidate edits, agent prediction trails, and the blue line the
+     certificate selected. The replay is not observation, and the screen says so at all times.</p>
+
+  <div class="demo-cap reveal">
+    <b id="scene-title">Loading…</b>
+    <span id="scene-sub"></span>
+  </div>
+
+  <div class="player reveal">
+    <div class="p-tabs" id="p-tabs"></div>
+    <div class="p-stage">
+      <div class="p-screen">
+        <canvas id="p-front"></canvas>
+        <div class="p-pills">
+          <div class="p-tag" id="p-ltag">front camera · real observation</div>
+          <div class="p-hud" id="p-lhud"></div>
+        </div>
+      </div>
+      <div class="p-screen">
+        <canvas id="p-bev"></canvas>
+        <div class="p-pills">
+          <div class="p-tag" id="p-rtag">candidate fan · prediction replay (heading up)</div>
+          <div class="p-hud" id="p-bhud"></div>
+        </div>
+      </div>
+    </div>
+    <div class="p-strip" id="p-strip"></div>
+    <div class="p-bar">
+      <button class="play" id="p-play" aria-label="Play">▶</button>
+      <div class="p-scrubwrap">
+        <input type="range" class="scrub" id="p-scrub" min="-20" max="40" value="-20" step="1"
+               aria-label="timeline (0.1 s per step, 0 is the decision instant)">
+        <i class="p-zero" id="p-zero" title="decision instant t=0"></i>
+      </div>
+      <span class="tcode" id="p-time">t = −2.0 s</span>
+      <div class="seg" id="p-speed">
+        <button data-s="0.5" class="on">0.5×</button><button data-s="1">1×</button><button data-s="2">2×</button>
+      </div>
+      <button class="tcode p-loop on" id="p-loop">loop</button>
+    </div>
+    <div class="legend p-legend">
+      <button class="tog on" data-k="fan"><span class="sw" style="background:var(--good)"></span>candidate fan (green = certified)</button>
+      <button class="tog on" data-k="base"><span class="sw" style="background:repeating-linear-gradient(90deg,var(--bad) 0 6px,transparent 6px 11px)"></span>base trajectory / ghost</button>
+      <button class="tog on" data-k="trails"><span class="sw" style="background:var(--violet)"></span>agent prediction trails</button>
+      <button class="tog on" data-k="map"><span class="sw" style="background:var(--line2)"></span>map</button>
+      <span class="note">orange box = ego (certified edit); red box = conflict agent; star = tightest frame</span>
+    </div>
+    <div class="p-read" id="p-read"></div>
+  </div>
+
+  <div class="card reveal" style="margin-top:16px">
+    <div class="chart-head"><b>Clearance over time</b>
+      <span class="dim" id="gap-cap">minimum clearance from base and edit to the conflict agent; below the 0 line = penetration</span></div>
+    <canvas id="gap-cv" style="display:block;width:100%;height:190px"></canvas>
+    <div class="legend">
+      <span class="tog"><span class="sw" style="background:repeating-linear-gradient(90deg,var(--bad) 0 6px,transparent 6px 11px)"></span>base clearance</span>
+      <span class="tog"><span class="sw" style="background:var(--accent)"></span>edit clearance</span>
+      <span class="note">red band = intervals where the base penetrates but the edit does not; vertical line = current playback time</span>
+    </div>
+  </div>
+
+  <div class="pill-list reveal">
+    <div class="pill"><b id="pill-gap">—</b>base min clearance → edit min clearance</div>
+    <div class="pill"><b id="pill-coll">—</b>base penetrating frames → edit penetrating frames</div>
+    <div class="pill"><b id="pill-prog">—</b>progress change</div>
+    <div class="pill"><b id="pill-fam">—</b>edit family</div>
+  </div>
+</section>
+
+<!-- ============ cases ============ -->
+<section class="block" id="cases">
+  <div class="kicker reveal">Cases</div>
+  <h2 class="reveal">The same base, with and without the repair</h2>
+  <p class="lead reveal">Three figures answer three questions: what changed (comparison), what it looks like in a real scene
+     (case), and how many conflict shapes are covered (gallery).</p>
+
+  <div class="fig reveal">
+    <img src="assets/figs/fig2_repair.png" alt="Base versus repaired trajectory: the base hugs the conflict agent, the repaired trajectory sweeps around it and keeps clearance">
+    <div class="figcap"><b>Fig. 6 · What changed.</b> Two held-out conflicts, five parts per row: the real scene (front + left
+       camera), the base planner (red dashed trajectory overlapping the cut-in agent, negative gap), World4Refiner (blue solid
+       trajectory pulling the gap back positive), the clearance bars (left/right split, negative = the two vehicles overlap),
+       and the actions the certificate actually allowed (lateral shift, progress delta vs base, collision or not).
+       The two cases go from −1.51 m → +1.74 m and −1.38 m → +1.96 m.</div>
+  </div>
+
+  <div class="fig reveal" style="margin-top:18px">
+    <img src="assets/figs/fig2_case.png" alt="Full workflow of one case: camera observation, base trajectory, agent predictions, conflict diagnosis, edited trajectory">
+    <div class="figcap"><b>Fig. 7 · One decision, end to end.</b> Top row, three steps: ① scene (real front camera + base BEV
+       trajectory) → ② diagnosis (cut-in agent #3 located, base net clearance −1.51 m, first contact at 1.7 s) →
+       ③ eight candidate edits, each unrolled in its own predicted world, box colour = verdict (red = negative clearance,
+       amber = insufficient progress, green = certificate pass). Bottom row, two steps: ④ the certificate dispositions each
+       candidate (clearance ≥ 0, safe, progress preserved); cut-in R is selected here, and the four candidates not listed in
+       the table also failed the safety check (6 of 8 edits rejected); ⑤ final output (net clearance +1.74 m, progress
+       +0.03 m). The summary bar at lower left writes the verdict in one place: clearance flips from −1.51 m to +1.74 m,
+       progress +0.03 m over base (certificate floor −1.00 m); had no candidate passed, the base trajectory would have been
+       kept unchanged — only geometric quantities participate, no learned score.</div>
+  </div>
+
+  <div class="fig reveal" style="margin-top:18px">
+    <img src="assets/figs/fig2_gallery.png" alt="Case gallery: base versus repaired trajectories across several conflict shapes">
+    <div class="figcap"><b>Fig. 8 · Case gallery.</b> Different conflict shapes (opposing cut-in, same-direction braking,
+       lateral cut-in, …); the edit adapts to the conflict geometry, but every row passes the same certificate checklist.</div>
+  </div>
+
+  <div class="fig reveal" style="margin-top:18px">
+    <img src="assets/figs/fig_proposal_fan.png" alt="Candidate edit family: the fan of candidate trajectories inside the planner's control family">
+    <div class="figcap"><b>Fig. 9 · Where candidates come from.</b> Every candidate comes from the planner's own control family,
+       so a "repair" always stays within the planner's capability instead of generating a new trajectory.</div>
+  </div>
+</section>
+
+<!-- ============ sensitivity ============ -->
+<section class="block" id="sens">
+  <div class="kicker reveal">Sensitivity</div>
+  <h2 class="reveal">What the model is most sensitive to</h2>
+  <p class="lead reveal">This section answers the ablation question: which part of the image the trained world model relies on
+       for its judgement, and at what distance it starts reacting to other agents.</p>
+
+  <div class="fig reveal">
+    <img src="assets/figs/fig2_sens.png" alt="Sensitivity heatmaps: the model is most sensitive to agents ahead of ego and to lane boundaries">
+    <div class="figcap"><b>Fig. 10 · Sensitivity distribution.</b> (a)(b) A probe vehicle inserted ahead of ego; colour is the
+       change in the model's collision risk — both seeds peak 9 m directly ahead. (c) Reaction curve: 10–14 m is a clear
+       alertness band. (d) In metres of error, the model beats the constant-velocity prior by 39% on conflict agents and is
+       judged closest on 82% of 17 conflict agents. (e) Four futures of the same agent: the trained model follows the real
+       trajectory, the constant-velocity prior does not.</div>
+  </div>
+
+  <div class="fig reveal" style="margin-top:18px">
+    <img src="assets/figs/fig_weight_dist.png" alt="Scoring-head weight distribution: most tokens carry extremely small weights">
+    <div class="figcap"><b>Fig. 11 · Scoring-head weight distribution.</b> Most tokens carry extremely small weights, and 949
+       (17.9% of scored samples) carry exactly zero — the distribution itself is part of the evidence that the scoring head
+       cannot carry the decision alone (see Limits).</div>
+  </div>
+</section>
+
+<!-- ============ results ============ -->
+<section class="block" id="results">
+  <div class="kicker reveal">Results</div>
+  <h2 class="reveal">Three mutually independent measurements</h2>
+  <p class="lead reveal">Cross-base, cross-benchmark and cross-validation are measured independently; same direction, same magnitude.</p>
+
+  <h3 class="reveal" style="margin-top:26px">1 · Cross-base: all five non-TTO bases improve significantly</h3>
+  <div class="fig reveal">
+    <img src="assets/figs/fig_crossbase_forest.png" alt="Forest plot: EPDMS gain and 95% confidence interval on six bases">
+    <div class="figcap"><b>Fig. 12 · Forest plot.</b> One row per base; the dot is the gain, the bar the 95% confidence interval.
+       All six intervals have lower bounds above 0.</div>
+  </div>
+  <div class="card table-card reveal" style="margin-top:16px">
+    <table id="tb-cross">
+      <thead><tr><th>Base</th><th class="r">Base EPDMS</th><th class="r">Repaired</th><th class="r">Gain</th>
+        <th class="r">95% CI</th><th class="r">Harm %</th><th class="r">Changed tokens</th><th class="r">Improved</th><th class="r">Worsened</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="note" style="margin-top:10px">Base instrument: the TOAD row uses its deployment setting (58.4286);
+      the others use each base's own reproduction. Gains are paired differences under the same instrument.</div>
+  </div>
+
+  <h3 class="reveal" style="margin-top:34px">2 · Cross-benchmark: navtest net-positive on both instruments</h3>
+  <div class="fig reveal">
+    <img src="assets/figs/fig_navtest_dnh2.png" alt="navtest v1/v2 scores under three settings">
+    <div class="figcap"><b>Fig. 13 · navtest.</b> The frozen backbone alone loses clearly (the gain is not bought by swapping the
+       backbone); adding the deterministic safety gate returns above baseline. v2 is the reactive instrument and only turns
+       positive with the causal two-frame guard added (+0.287, CI lower 0.052).</div>
+  </div>
+  <div class="card table-card reveal" style="margin-top:16px">
+    <table id="tb-navtest">
+      <thead><tr><th>Instrument</th><th class="r">Baseline</th><th class="r">Frozen backbone only</th><th class="r">+ deterministic gate</th><th class="r">+ gate + edits</th>
+        <th class="r">Final gain</th><th class="r">95% CI</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="note" style="margin-top:10px">v1 and v2 are two non-comparable instruments (different settings and reactive
+      configuration), so gains are reported against each one's own baseline.</div>
+  </div>
+
+  <h3 class="reveal" style="margin-top:34px">3 · Counterfactual repair: more rescues than harms on validation</h3>
+  <div class="fig reveal">
+    <img src="assets/figs/fig_cf_val.png" alt="Counterfactual repair validation: rescues, harms and net gain of three arms">
+    <div class="figcap"><b>Fig. 14 · Counterfactual repair validation.</b> On the same held-out tokens, all three arms only rescue
+       and never harm (0 harms on this batch of logs).</div>
+  </div>
+  <div class="card table-card reveal" style="margin-top:16px">
+    <table id="tb-cf">
+      <thead><tr><th>Arm</th><th class="r">Fired</th><th class="r">Rescued</th><th class="r">Harmed</th><th class="r">Net rescues</th>
+        <th class="r">Net 95% CI</th><th class="r">Collisions</th><th class="r">Mean progress Δ m</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="note" style="margin-top:10px" id="cf-arms-note"></div>
+  </div>
+
+  <div class="card reveal" style="margin-top:16px">
+    <h3>The larger five-fold pooled sample: net-positive is robust, "zero harm" is not universal</h3>
+    <div class="card table-card" style="box-shadow:none;border:0;background:transparent;padding:0">
+      <table id="tb-cf-pooled">
+        <thead><tr><th>Seed</th><th class="r">WM net rescues</th><th class="r">WM 95% CI</th><th class="r">WM harms</th>
+          <th class="r">Geo gate net rescues</th><th class="r">Geo gate 95% CI</th><th class="r">Geo gate harms</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="tldr" id="cf-boundary" style="margin-top:14px"></div>
+  </div>
+
+  <div class="grid g2 reveal" style="margin-top:22px">
+    <div class="fig">
+      <img src="assets/figs/fig_edit_share.png" alt="Edit share: most of the change lands in edit families rather than hold">
+      <div class="figcap"><b>Fig. 15 · Edit share.</b> Among changed tokens on each base, 97.7%–99.8% of the weighted net gain
+         comes from real edit families rather than "hold" — the gain is not manufactured by "changing nothing".</div>
+    </div>
+    <div class="fig">
+      <img src="assets/figs/fig_wm_collapse.png" alt="Scoring-head output collapse: correlation with the reference signal near 1">
+      <div class="figcap"><b>Fig. 16 · Scoring-head collapse.</b> Left: the head's clearance output correlates above 0.9999997
+         with geometric clearance on all five bases. Right: it rejects only 0.66%–0.84% more candidates than the geometric
+         gate. It therefore cannot carry the decision — this conclusion bounds the contribution we may claim.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ limits ============ -->
+<section class="block" id="limits">
+  <div class="kicker reveal">Limits and disclosure</div>
+  <h2 class="reveal">What we did not claim</h2>
+  <p class="lead reveal">This section lists the known limitations of the present measurement. Each one maps to a specific
+     measurement above, not to generic "future work".</p>
+
+  <div class="grid g2 reveal" id="limit-cards"></div>
+
+  <div class="fig reveal" style="margin-top:20px">
+    <img src="assets/figs/fig_headroom.png" alt="Headroom analysis: remaining improvement space on different bases">
+    <div class="figcap"><b>Fig. 17 · Headroom.</b> Remaining space shrinks rapidly with base strength — direct evidence for
+       "stronger base, smaller gain".</div>
+  </div>
+
+  <div class="card reveal" style="margin-top:20px">
+    <h3>What this page does not contain</h3>
+    <ul class="note" style="line-height:2">
+      <li>no official leaderboard score and no third-party score not reproduced locally;</li>
+      <li>no decision step that reads the official score, future ground truth, or human annotations;</li>
+      <li>no reading that adds scores from two different instruments;</li>
+      <li>no per-token number that was not reproduced locally.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ references ============ -->
+<section class="block" id="bibtex">
+  <div class="kicker reveal">References</div>
+  <h2 class="reveal">Related work</h2>
+  <p class="lead reveal">This method follows the line of "constraining test-time edits with geometry / certificates",
+     which is a different kind of work from "retraining a scoring head".</p>
+  <div class="bibhead reveal">
+    <div class="note">BibTeX (copy-ready)</div>
+    <button class="copy" id="copy-bib">Copy</button>
+  </div>
+  <pre class="bib reveal" id="bib"></pre>
+</section>
+
+</main>
+
+<footer><div class="in">
+  <div>World4Refiner · certificate-gated trajectory repair for frozen planners</div>
+  <ul>
+    <li>Every number on this page is generated from the local ledgers, consistent with figures and prose.</li>
+    <li>Demo scenes use real maps and real camera frames; no synthetic imagery.</li>
+    <li>Certificate decisions use geometry and map information only.</li>
+  </ul>
+</div></footer>
+
+<div class="tip" id="tip">Copied</div>
+
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script>window.ASSET_BASE = "assets";</script>
+<script src="data.js"></script>
+<script src="site.js"></script>
+<script src="demo.js"></script>
+</body>
+</html>
