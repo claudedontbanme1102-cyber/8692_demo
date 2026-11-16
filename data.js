@@ -31,7 +31,7 @@ window.W4R = {
       "pool": 64
     },
     {
-      "name": "SparseDrive",
+      "name": "SparseDriveV2",
       "base": 40.482272,
       "ours": 43.940536,
       "d": 3.458264,
@@ -239,7 +239,7 @@ window.W4R = {
       "frac": 0.9964
     },
     {
-      "name": "SparseDrive",
+      "name": "SparseDriveV2",
       "hold": 2362,
       "edit": 3100,
       "net": 17.873544,
@@ -274,7 +274,7 @@ window.W4R = {
       "rej": 0.0084
     },
     {
-      "name": "SparseDrive",
+      "name": "SparseDriveV2",
       "corr": 0.999999738,
       "med": 0.0857,
       "rej": 0.0071
