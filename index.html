@@ -96,16 +96,18 @@
      progress is preserved; otherwise the base plan is returned unchanged.</p>
 
   <div class="fig reveal">
-    <img src="assets/figs/fig3_motivation.png" alt="Three-act motivation cartoon: act one, the frozen planner's committed path penetrates a predicted agent box (hatched overlap, worst-frame gap -1.51 m at frame 40/41); act two, three tempting but undeployable fixes (retrain the planner, train a learned scorer correlated 0.9999998 with the geometric head, read the evaluation answer key); act three, the four-step geometric certificate (edit within the family, roll forward against own predictions, non-negative signed clearance per frame, commit on pass else keep base) with three result tiles (5/5 non-TTO bases positive, 14/0 rescues/harms, 56/56 edits attributable)">
-    <div class="figcap"><b>Fig. 1 · Motivation in three acts.</b> <b>Act one</b>: a real held-out scene; the red path is the base
-       trajectory committed by the frozen planner. The small bird's-eye view below draws the tightest pair at the worst frame —
-       ego (red) and the agent box (grey) overlap in the hatched region, gap −1.51 m at frame 40 / 41 (t = +4.0 s).
-       <b>Act two</b>: three fixes that look tempting but are undeployable — retraining means new weights and weeks of GPU while
-       the deployment stack is frozen by contract; a learned scorer correlates 0.9999998 with the geometric head, so the learned
-       part adds nothing; reading the answer key (oracle / future ground truth / official score) is worse: unavailable at
-       deployment, and using it would be cheating. <b>Act three</b>: ask geometry instead — four checkable steps; the three tiles
-       at the bottom are the receipt: 5/5 non-TTO bases positive, 14 rescues / 0 harms held-out, 56/56 committed edits attributable
-       to a specific agent and frame. <b>What we add is a proof, not a score.</b></div>
+    <img src="assets/figs/fig3_motivation.png" alt="Two-panel motivation cartoon. Left red panel: the frozen planner's committed path penetrates a cut-in agent (hatched overlap, worst clearance -1.51 m), and three tempting fixes - retrain the planner, let a learned judge pick, read the evaluation key - are each crossed out as unavailable under the deployment contract. Right green panel: propose (a candidate-conditioned world model re-imagines the agents for 8 local edits of the same plan over 41 frames and 37 agents), prove (commit(a) = F and S and P: hard safety, continuous safety, progress; exact geometry, no learned score), commit (or keep base, because the base plan is candidate 0); every commit explains itself: agent -> penetration -> edit, -1.51 -> +1.74 m at +0.03 m progress.">
+    <div class="figcap"><b>Fig. 1 · Why the obvious fixes fail, and what we add instead.</b> <b>Left (red)</b>: on a real
+       held-out cut-in scene the frozen planner's committed path penetrates the predicted agent box (hatched overlap,
+       worst clearance −1.51 m); the three tempting fixes each break the deployment contract — (a) retraining the planner
+       spends months of data and GPUs on a few bad scenes, (b) a learned judge is a reward, not a proof, and its blind
+       spots get over-optimized, (c) reading the evaluation key (future ground truth / official score) is forbidden at
+       decision time. <b>Right (green)</b>: propose → prove → commit. A candidate-conditioned world model re-imagines the
+       agents for each of eight local edits of the same plan over 41 frames and 37 agents; the certificate commits an edit
+       only if <b>F</b> (no penetration in any frame), <b>S</b> (a signed gap to every agent at every frame) and <b>P</b>
+       (progress within 1 m of base) all hold — exact geometry, no learned score. The base plan is candidate 0, so the gate
+       can always answer 'keep base'. Every commit explains itself: agent → penetration → edit, −1.51 → +1.74 m at
+       +0.03 m progress. <b>What we add is a proof, not a score.</b></div>
   </div>
 </section>
 
